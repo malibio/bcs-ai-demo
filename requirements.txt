@@ -5,6 +5,10 @@ python-dotenv==1.0.0
 requests==2.32.5
 
 # Voice Cloning Dependencies (for voice_server.py)
+# NOTE: TTS requires Python 3.9-3.11 (NOT 3.12+)
+# Use python3.11 to create venv if your system default is newer
 TTS==0.22.0
 torch==2.8.0
 torchaudio==2.8.0
+transformers==4.46.3
+tokenizers==0.20.3
