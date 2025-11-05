@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Talk to SpongeBob AI!</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎭 Talk to SpongeBob AI!</h1>
+            <p class="subtitle">See how AI learns to talk like your favorite character</p>
+        </header>
+
+        <div class="main-content">
+            <!-- Left side: SpongeBob character -->
+            <div class="character-section">
+                <div class="character-avatar">
+                    <img src="{{ url_for('static', filename='spongebob-image.png') }}" alt="SpongeBob" class="character-image">
+                    <h2>SpongeBob SquarePants</h2>
+                    <p class="character-subtitle">AI-Powered Voice Clone</p>
+                </div>
+                <div class="info-section">
+                    <p>💡 <strong>How it works:</strong> AI learns SpongeBob's personality and tries to talk just like him!</p>
+                </div>
+            </div>
+
+            <!-- Right side: Chat area -->
+            <div class="chat-container">
+                <div id="chatBox" class="chat-box">
+                    <div class="message bot-message">
+                        <strong>SpongeBob:</strong> I'm ready! I'm ready! Ask me anything!
+                    </div>
+                </div>
+
+                <div class="input-section">
+                    <input
+                        type="text"
+                        id="userInput"
+                        placeholder="Type your message here..."
+                        autocomplete="off"
+                    >
+                    <button id="sendBtn">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const chatBox = document.getElementById('chatBox');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+
+        let lastBotMessage = "I'm ready! I'm ready! Ask me anything!";
+        let currentAudio = null;
+
+        // Send message function
+        async function sendMessage() {
+            const message = userInput.value.trim();
+            if (!message) return;
+
+            const pipelineStart = performance.now();
+
+            // Add user message to chat
+            addMessage('You', message, 'user-message');
+            userInput.value = '';
+
+            // Show loading
+            const loadingDiv = addMessage('SpongeBob', 'Thinking...', 'bot-message loading');
+
+            try {
+                const textStart = performance.now();
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        character: 'spongebob'
+                    })
+                });
+
+                const data = await response.json();
+                const textEnd = performance.now();
+
+                // Remove loading message
+                loadingDiv.remove();
+
+                if (data.success) {
+                    lastBotMessage = data.response;
+                    addMessage('SpongeBob', data.response, 'bot-message');
+
+                    console.log(`⏱️  TEXT GENERATION: ${(textEnd - textStart).toFixed(0)}ms (Gemini: ${(data.timing?.gemini * 1000).toFixed(0)}ms)`);
+
+                    // Always use cloned voice
+                    const voiceStart = performance.now();
+                    await speakWithClonedVoice(data.response);
+                    const voiceEnd = performance.now();
+
+                    const totalTime = voiceEnd - pipelineStart;
+                    console.log(`⏱️  TOTAL PIPELINE: ${totalTime.toFixed(0)}ms (${(totalTime/1000).toFixed(1)}s)`);
+                } else {
+                    addMessage('Error', 'Oops! Something went wrong.', 'bot-message error');
+                }
+
+            } catch (error) {
+                loadingDiv.remove();
+                addMessage('Error', 'Could not connect to server.', 'bot-message error');
+                console.error('Error:', error);
+            }
+        }
+
+        // Add message to chat
+        function addMessage(sender, text, className) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${className}`;
+            messageDiv.innerHTML = `<strong>${sender}:</strong> ${text}`;
+            chatBox.appendChild(messageDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+            return messageDiv;
+        }
+
+        // Cloned voice function
+        async function speakWithClonedVoice(text) {
+            try {
+                // Create audio element early (helps with autoplay policy)
+                currentAudio = new Audio();
+
+                const voiceGenStart = performance.now();
+                const response = await fetch('/generate-voice', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ text: text })
+                });
+
+                const data = await response.json();
+                const voiceGenEnd = performance.now();
+
+                if (data.success) {
+                    // Log detailed timing
+                    if (data.timing) {
+                        console.log(`🎙️  VOICE GENERATION: ${(voiceGenEnd - voiceGenStart).toFixed(0)}ms total`);
+                        console.log(`   ├─ TTS Model: ${(data.timing.voice_generation * 1000).toFixed(0)}ms`);
+                        console.log(`   ├─ Network: ${(data.timing.network_overhead * 1000).toFixed(0)}ms`);
+                        console.log(`   └─ Frontend overhead: ${((voiceGenEnd - voiceGenStart) - data.timing.total * 1000).toFixed(0)}ms`);
+                    }
+
+                    // Set the audio source (add timestamp to prevent caching)
+                    const audioUrl = data.audio_url + '?t=' + Date.now();
+                    const audioLoadStart = performance.now();
+
+                    currentAudio.src = audioUrl;
+
+                    currentAudio.onloadeddata = () => {
+                        const audioLoadEnd = performance.now();
+                        console.log(`📥 AUDIO DOWNLOAD: ${(audioLoadEnd - audioLoadStart).toFixed(0)}ms`);
+                    };
+
+                    currentAudio.onplay = () => {
+                        console.log(`▶️  Audio started playing`);
+                    };
+
+                    currentAudio.onended = () => {
+                        console.log('✅ Audio playback finished');
+                    };
+
+                    currentAudio.onerror = (e) => {
+                        console.error('Audio playback error:', e);
+                    };
+
+                    // Load and play
+                    currentAudio.load();
+                    currentAudio.play().catch(err => {
+                        console.error('Play failed:', err);
+                    });
+                } else {
+                    throw new Error(data.error || 'Voice generation failed');
+                }
+
+            } catch (error) {
+                console.error('Voice generation error:', error);
+            }
+        }
+
+        // Event listeners
+        sendBtn.addEventListener('click', sendMessage);
+
+        userInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        // Focus input on load
+        userInput.focus();
+
+        // Play welcome message on load (with user interaction fallback)
+        window.addEventListener('load', () => {
+            // Small delay to ensure page is fully loaded
+            setTimeout(() => {
+                const welcomeAudio = new Audio('/static/audio/welcome.wav');
+                welcomeAudio.play().catch(err => {
+                    console.log('Autoplay blocked. Welcome audio will play on first interaction.');
+                    // Play on first user interaction
+                    const playWelcome = () => {
+                        welcomeAudio.play();
+                        document.removeEventListener('click', playWelcome);
+                        document.removeEventListener('keydown', playWelcome);
+                    };
+                    document.addEventListener('click', playWelcome, { once: true });
+                    document.addEventListener('keydown', playWelcome, { once: true });
+                });
+            }, 500);
+        });
+    </script>
+</body>
+</html>
