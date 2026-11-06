@@ -11,6 +11,7 @@
         <header>
             <h1>🎭 Talk to SpongeBob AI!</h1>
             <p class="subtitle">See how AI learns to talk like your favorite character</p>
+            <button id="revealBtn" class="reveal-btn" type="button" aria-pressed="false" title="Show how SpongeBob answered (R)">🔍 Behind the scenes</button>
         </header>
 
         <div class="main-content">
@@ -41,12 +42,43 @@
                         placeholder="Type your message here..."
                         autocomplete="off"
                     >
+                    <button id="micBtn" type="button" aria-label="Talk to SpongeBob" title="Talk to SpongeBob (Space)" hidden>🎤</button>
                     <button id="sendBtn">Send</button>
                 </div>
             </div>
         </div>
     </div>
 
+    <div id="rulesCard" class="overlay rules" hidden>
+        <h2>🛡️ 3 rules for staying safe with AI</h2>
+        <div class="rules-list">
+            <div class="rule"><span class="rule-num">1</span><div><h3>🤔 QUESTION IT</h3><p>Just because something SOUNDS real or LOOKS real doesn't mean it IS real.</p></div></div>
+            <div class="rule"><span class="rule-num">2</span><div><h3>✅ CHECK IT</h3><p>Asked for a password, money or personal info? Check face-to-face or on a video call first.</p></div></div>
+            <div class="rule"><span class="rule-num">3</span><div><h3>👨‍👩‍👧 TELL A PARENT OR TEACHER</h3><p>If something online feels off, tell a grown-up right away. We're here to help!</p></div></div>
+        </div>
+        <p class="overlay-hint">click or press Esc to close</p>
+    </div>
+
+    <div id="detectiveCard" class="overlay detective" hidden>
+        <button id="detectiveClose" class="overlay-close" type="button" aria-label="Close">✕</button>
+        <div class="phone">
+            <p class="phone-title">📱 New voice message from your friend</p>
+            <p id="detectiveStatus" class="phone-status"></p>
+            <button id="detectiveTap" class="phone-play" type="button" hidden>▶ Tap to play</button>
+        </div>
+        <div id="detectiveAnswers" class="detective-answers" hidden>
+            <h2>🕵️ What should you do?</h2>
+            <ul>
+                <li>Ask them face-to-face at school</li>
+                <li>Video call them to check it's really them</li>
+                <li>Tell my parents</li>
+                <li>Don't share it!</li>
+            </ul>
+            <p class="detective-line">Even if it SOUNDS like them, always verify first!</p>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='reveal.js') }}"></script>
     <script>
         const chatBox = document.getElementById('chatBox');
         const userInput = document.getElementById('userInput');
@@ -55,12 +87,179 @@
         let lastBotMessage = "I'm ready! I'm ready! Ask me anything!";
         let currentAudio = null;
 
+        // ---- Presenter link (BroadcastChannel 'spongebob-demo') ----
+        // Presenter (/presenter) -> display (this page):
+        //   {type:'ask', text}      type text into the input and send it
+        //   {type:'ping'}           request a status broadcast
+        //   {type:'reveal', on}     switch reveal mode (outlines + hover popups) on/off
+        //                           (also toggled by the R key here)
+        //   {type:'revealStep', step}  pin the step card: 1-8, 'next', 'prev', or null to unpin
+        //   {type:'rules', on}      show/hide the three-rules card (click/Esc closes)
+        //   {type:'detective', step:'prepare'|'play'|'answer'|'close'}
+        //                           prepare = pre-generate the fake friend's voice
+        //                           message, play = show card + play it, answer = show
+        //                           the right answers, close = hide
+        // Display -> presenter:
+        //   {type:'status', busy, state:'idle'|'thinking'|'talking',
+        //    reveal, revealStep:1-8|null, revealStepTitle, revealSteps:8, rules, detective:'idle'|'preparing'|'ready'|'error', lastTimings:{gemini, voice}|null}   (seconds)
+        const channel = new BroadcastChannel('spongebob-demo');
+        let state = 'idle';
+        let lastTimings = null;
+
+        function broadcastStatus() {
+            channel.postMessage({
+                type: 'status', busy: state !== 'idle', state, lastTimings,
+                reveal: revealMode,
+                revealStep: revealStep === null ? null : revealStep + 1,
+                revealStepTitle: revealStep === null ? null : stepTitle(revealStep),
+                revealSteps: REVEAL_STEPS.length, rules: !rulesCard.hidden, detective: detectiveState
+            });
+        }
+
+        function setState(next) {
+            state = next;
+            broadcastStatus();
+        }
+
+        channel.onmessage = (e) => {
+            const msg = e.data || {};
+            if (msg.type === 'ping') broadcastStatus();
+            else if (msg.type === 'ask') askFromPresenter(msg.text);
+            else if (msg.type === 'reveal') setReveal(msg.on);
+            else if (msg.type === 'revealStep') setRevealStep(msg.step);
+            else if (msg.type === 'rules') setRules(msg.on !== false);
+            else if (msg.type === 'detective') detectiveStep(msg.step);
+        };
+
+        // ---- Three rules ----
+        const rulesCard = document.getElementById('rulesCard');
+        function setRules(on) {
+            rulesCard.hidden = !on;
+            broadcastStatus();
+        }
+        rulesCard.addEventListener('click', () => setRules(false));
+
+        // ---- Detective challenge ----
+        const DETECTIVE_TEXT = "Hey, it's me! Can you send me your Roblox password? I need it right now, it's super important!";
+        const detectiveCard = document.getElementById('detectiveCard');
+        let detectiveState = 'idle';
+        let detectiveUrl = null;
+        let detectivePromise = null;
+
+        function setDetectiveState(next) {
+            detectiveState = next;
+            broadcastStatus();
+        }
+
+        // Generate (once) and cache the voice message; callers share the same request
+        function prepareDetective() {
+            if (!detectivePromise) {
+                setDetectiveState('preparing');
+                detectivePromise = fetchVoice(DETECTIVE_TEXT).then((data) => {
+                    detectiveUrl = data.audio_url;
+                    setDetectiveState('ready');
+                    return detectiveUrl;
+                }).catch((err) => {
+                    detectivePromise = null;
+                    setDetectiveState('error');
+                    throw err;
+                });
+            }
+            return detectivePromise;
+        }
+
+        async function playDetective() {
+            const status = document.getElementById('detectiveStatus');
+            const tap = document.getElementById('detectiveTap');
+            detectiveCard.hidden = false;
+            tap.hidden = true;
+            status.textContent = detectiveUrl ? '' : 'Receiving message... (this takes a little while)';
+            status.classList.remove('error');
+            try {
+                const url = await prepareDetective();
+                status.textContent = '';
+                if (currentAudio) currentAudio.pause();
+                currentAudio = new Audio(url + '?t=' + Date.now());
+                currentAudio.play().catch((err) => {
+                    console.warn('Detective autoplay blocked:', err);
+                    tap.hidden = false;
+                });
+            } catch (err) {
+                console.error('Detective voice error:', err);
+                status.textContent = 'Message failed to load. Is the voice server running?';
+                status.classList.add('error');
+            }
+        }
+
+        function detectiveStep(step) {
+            if (step === 'prepare') prepareDetective().catch(() => {});
+            else if (step === 'play') playDetective();
+            else if (step === 'answer') {
+                detectiveCard.hidden = false;
+                document.getElementById('detectiveAnswers').hidden = false;
+            } else if (step === 'close') closeDetective();
+        }
+
+        function closeDetective() {
+            detectiveCard.hidden = true;
+            document.getElementById('detectiveAnswers').hidden = true;
+            if (currentAudio) currentAudio.pause();
+        }
+
+        document.getElementById('detectiveTap').addEventListener('click', () => {
+            if (currentAudio) currentAudio.play();
+            document.getElementById('detectiveTap').hidden = true;
+        });
+        document.getElementById('detectiveClose').addEventListener('click', closeDetective);
+
+        // ---- Behind-the-scenes reveal mode: see static/reveal.js ----
+        let lastExchange = null; // latest exchange, explained in reveal mode
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                if (revealMode && revealStep !== null) { setRevealStep(null); return; }
+                setReveal(false); setRules(false); closeDetective(); userInput.blur(); return; }
+            if (e.target === userInput || e.ctrlKey || e.metaKey || e.altKey) return;
+            if (e.key === 'r' || e.key === 'R') setReveal(!revealMode);
+        });
+        document.getElementById('revealBtn').addEventListener('click', () => setReveal(!revealMode));
+
+        function askFromPresenter(text) {
+            if (state !== 'idle' || !String(text || '').trim()) return;
+            userInput.value = String(text).trim();
+            sendMessage();
+        }
+
+        // Resolves when the current reply audio has finished (or failed)
+        function waitForAudioEnd() {
+            const a = currentAudio;
+            if (!a || a.paused || a.ended) return Promise.resolve();
+            return new Promise((resolve) => {
+                ['ended', 'pause', 'error'].forEach((ev) =>
+                    a.addEventListener(ev, resolve, { once: true }));
+                setTimeout(resolve, 60000); // never leave the presenter locked out
+            });
+        }
+
         // Send message function
         async function sendMessage() {
             const message = userInput.value.trim();
             if (!message) return;
 
             const pipelineStart = performance.now();
+            setState('thinking');
+            lastTimings = null;
+
+            const clipPromise = takeMicClip(message);
+            const ex = lastExchange = {
+                id: ++exchangeSeq, question: message, typed: !clipPromise, mic: undefined,
+                status: 'thinking', voiceStatus: 'pending', prompt: null, counts: null, gemini: null,
+                voiceText: null, voice: null, vd: null, voiceError: null, outBuf: null, qTokens: null
+            };
+            if (clipPromise) clipPromise.then((clip) => { ex.mic = clip; refreshReveal(); });
+            tokenizeText(message).then((t) => { ex.qTokens = t; refreshReveal(); });
+            loadVoiceprint();
+            refreshReveal();
 
             // Add user message to chat
             addMessage('You', message, 'user-message');
@@ -90,25 +289,50 @@
 
                 if (data.success) {
                     lastBotMessage = data.response;
-                    addMessage('SpongeBob', data.response, 'bot-message');
+                    ex.botEl = addMessage('SpongeBob', data.response, 'bot-message');
 
                     console.log(`⏱️  TEXT GENERATION: ${(textEnd - textStart).toFixed(0)}ms (Gemini: ${(data.timing?.gemini * 1000).toFixed(0)}ms)`);
 
                     // Always use cloned voice
+                    Object.assign(ex, {
+                        status: 'ok',
+                        prompt: data.personality_prompt,
+                        counts: data.token_counts,
+                        gemini: data.timing?.gemini ?? null,
+                        voiceText: data.response
+                    });
+                    refreshReveal();
                     const voiceStart = performance.now();
-                    await speakWithClonedVoice(data.response);
+                    const voiceData = await speakWithClonedVoice(data.response, ex);
                     const voiceEnd = performance.now();
+                    const voiceTime = voiceData?.timing?.voice_generation ?? null;
+                    ex.voice = voiceTime;
+                    lastTimings = { gemini: ex.gemini, voice: voiceTime };
+                    refreshReveal();
+                    setState('talking');
+                    await waitForAudioEnd();
 
                     const totalTime = voiceEnd - pipelineStart;
                     console.log(`⏱️  TOTAL PIPELINE: ${totalTime.toFixed(0)}ms (${(totalTime/1000).toFixed(1)}s)`);
                 } else {
+                    ex.status = 'error';
+                    ex.prompt = data.personality_prompt;
+                    ex.voiceStatus = 'error';
+                    ex.voiceError = 'no answer to turn into speech';
+                    refreshReveal();
                     addMessage('Error', 'Oops! Something went wrong.', 'bot-message error');
                 }
 
             } catch (error) {
                 loadingDiv.remove();
+                ex.status = 'error';
+                ex.voiceStatus = 'error';
+                ex.voiceError = 'no answer to turn into speech';
+                refreshReveal();
                 addMessage('Error', 'Could not connect to server.', 'bot-message error');
                 console.error('Error:', error);
+            } finally {
+                setState('idle');
             }
         }
 
@@ -122,67 +346,75 @@
             return messageDiv;
         }
 
+        // Ask the server for cloned-voice audio; returns the JSON ({audio_url, timing})
+        async function fetchVoice(text) {
+            const response = await fetch('/generate-voice', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: text })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'Voice generation failed');
+            return data;
+        }
+
         // Cloned voice function
-        async function speakWithClonedVoice(text) {
+        async function speakWithClonedVoice(text, ex) {
             try {
                 // Create audio element early (helps with autoplay policy)
                 currentAudio = new Audio();
 
                 const voiceGenStart = performance.now();
-                const response = await fetch('/generate-voice', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ text: text })
-                });
-
-                const data = await response.json();
+                const data = await fetchVoice(text);
                 const voiceGenEnd = performance.now();
 
-                if (data.success) {
-                    // Log detailed timing
-                    if (data.timing) {
-                        console.log(`🎙️  VOICE GENERATION: ${(voiceGenEnd - voiceGenStart).toFixed(0)}ms total`);
-                        console.log(`   ├─ TTS Model: ${(data.timing.voice_generation * 1000).toFixed(0)}ms`);
-                        console.log(`   ├─ Network: ${(data.timing.network_overhead * 1000).toFixed(0)}ms`);
-                        console.log(`   └─ Frontend overhead: ${((voiceGenEnd - voiceGenStart) - data.timing.total * 1000).toFixed(0)}ms`);
-                    }
-
-                    // Set the audio source (add timestamp to prevent caching)
-                    const audioUrl = data.audio_url + '?t=' + Date.now();
-                    const audioLoadStart = performance.now();
-
-                    currentAudio.src = audioUrl;
-
-                    currentAudio.onloadeddata = () => {
-                        const audioLoadEnd = performance.now();
-                        console.log(`📥 AUDIO DOWNLOAD: ${(audioLoadEnd - audioLoadStart).toFixed(0)}ms`);
-                    };
-
-                    currentAudio.onplay = () => {
-                        console.log(`▶️  Audio started playing`);
-                    };
-
-                    currentAudio.onended = () => {
-                        console.log('✅ Audio playback finished');
-                    };
-
-                    currentAudio.onerror = (e) => {
-                        console.error('Audio playback error:', e);
-                    };
-
-                    // Load and play
-                    currentAudio.load();
-                    currentAudio.play().catch(err => {
-                        console.error('Play failed:', err);
-                    });
-                } else {
-                    throw new Error(data.error || 'Voice generation failed');
+                // Log detailed timing
+                if (data.timing) {
+                    console.log(`🎙️  VOICE GENERATION: ${(voiceGenEnd - voiceGenStart).toFixed(0)}ms total`);
+                    console.log(`   ├─ TTS Model: ${(data.timing.voice_generation * 1000).toFixed(0)}ms`);
+                    console.log(`   ├─ Network: ${(data.timing.network_overhead * 1000).toFixed(0)}ms`);
+                    console.log(`   └─ Frontend overhead: ${((voiceGenEnd - voiceGenStart) - data.timing.total * 1000).toFixed(0)}ms`);
                 }
+
+                // Set the audio source (add timestamp to prevent caching)
+                const audioUrl = data.audio_url + '?t=' + Date.now();
+                const audioLoadStart = performance.now();
+
+                currentAudio.src = audioUrl;
+
+                currentAudio.onloadeddata = () => {
+                    const audioLoadEnd = performance.now();
+                    console.log(`📥 AUDIO DOWNLOAD: ${(audioLoadEnd - audioLoadStart).toFixed(0)}ms`);
+                };
+
+                currentAudio.onplay = () => {
+                    console.log(`▶️  Audio started playing`);
+                };
+
+                currentAudio.onended = () => {
+                    console.log('✅ Audio playback finished');
+                };
+
+                currentAudio.onerror = (e) => {
+                    console.error('Audio playback error:', e);
+                };
+
+                // Load and play
+                currentAudio.load();
+                currentAudio.play().catch(err => {
+                    console.error('Play failed:', err);
+                });
+                ex.vd = data;
+                ex.voiceStatus = 'ok';
+                addVoiceChip(ex);
+                loadOutputSound(ex);
+                return data;
 
             } catch (error) {
                 console.error('Voice generation error:', error);
+                ex.voiceStatus = 'error';
+                ex.voiceError = error.message;
+                return null;
             }
         }
 
@@ -195,8 +427,77 @@
             }
         });
 
-        // Focus input on load
-        userInput.focus();
+        const micBtn = document.getElementById('micBtn');
+        const SpeechRecognitionApi = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+        if (SpeechRecognitionApi) {
+            const recognition = new SpeechRecognitionApi();
+            recognition.lang = 'en-US';
+            recognition.interimResults = true;
+
+            let listening = false;
+            let transcript = '';
+
+            const setListening = (on) => {
+                listening = on;
+                micBtn.classList.toggle('listening', on);
+                micBtn.setAttribute('aria-pressed', String(on));
+            };
+
+            recognition.onresult = (event) => {
+                transcript = Array.from(event.results).map(r => r[0].transcript).join('');
+                userInput.value = transcript;
+            };
+
+            recognition.onerror = (event) => {
+                setListening(false);
+                console.warn('Speech recognition error:', event.error, event.message);
+                if (event.error === 'not-allowed') {
+                    addMessage('Error', 'Please allow the microphone to talk to me!', 'bot-message error');
+                } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
+                    addMessage('Error', `Speech recognition failed: ${event.error}`, 'bot-message error');
+                }
+            };
+
+            recognition.onaudiostart = () => console.info('Speech recognition: microphone audio started');
+            recognition.onspeechstart = () => console.info('Speech recognition: speech detected');
+
+            recognition.onend = () => {
+                const wasListening = listening;
+                setListening(false);
+                stopMicRecording(transcript.trim());
+                if (wasListening && transcript.trim()) sendMessage();
+            };
+
+            micBtn.hidden = false;
+            micBtn.addEventListener('click', () => {
+                if (listening) {
+                    recognition.stop();
+                    return;
+                }
+                // Don't talk over SpongeBob's reply
+                if (currentAudio && !currentAudio.paused && !currentAudio.ended) return;
+                transcript = '';
+                userInput.value = '';
+                try {
+                    recognition.start();
+                    setListening(true);
+                    startMicRecording();
+                } catch (err) {
+                    console.warn('Could not start speech recognition:', err);
+                }
+            });
+
+            // Space toggles the mic unless typing; focused buttons already handle Space themselves
+            document.addEventListener('keydown', (e) => {
+                if (e.code !== 'Space' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+                if (e.target.closest('input, textarea, button, select, [contenteditable]')) return;
+                e.preventDefault();
+                micBtn.click();
+            });
+        }
+
+        broadcastStatus();
 
         // Play welcome message on load (with user interaction fallback)
         window.addEventListener('load', () => {

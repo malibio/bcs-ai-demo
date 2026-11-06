@@ -47,9 +47,14 @@ User's message: """
 def index():
     return render_template('index.html')
 
+@app.route('/presenter')
+def presenter():
+    return render_template('presenter.html')
+
 @app.route('/chat', methods=['POST'])
 def chat():
     import time
+    personality_prompt = None  # also reported on the error path
     try:
         start_time = time.time()
 
@@ -60,12 +65,20 @@ def chat():
         # Get character prompt
         char_config = CHARACTERS.get(character, CHARACTERS['spongebob'])
         full_prompt = char_config['prompt'] + user_message
+        personality_prompt = char_config['prompt'].rsplit("User's message:", 1)[0].strip()
 
         # Generate response using Gemini
         gemini_start = time.time()
         response = model.generate_content(full_prompt)
         bot_response = response.text
         gemini_time = time.time() - gemini_start
+        try:
+            token_counts = {
+                'prompt': model.count_tokens(full_prompt).total_tokens,
+                'answer': model.count_tokens(bot_response).total_tokens
+            }
+        except Exception:
+            token_counts = None
 
         total_time = time.time() - start_time
 
@@ -75,6 +88,8 @@ def chat():
             'success': True,
             'response': bot_response,
             'character': char_config['name'],
+            'personality_prompt': personality_prompt,
+            'token_counts': token_counts,
             'timing': {
                 'gemini': gemini_time,
                 'total': total_time
@@ -84,7 +99,8 @@ def chat():
     except Exception as e:
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': str(e),
+            'personality_prompt': personality_prompt
         }), 500
 
 @app.route('/generate-voice', methods=['POST'])
@@ -112,7 +128,7 @@ def generate_voice():
         response = requests.post(
             'http://127.0.0.1:5001/generate',
             json={'text': text, 'output': output_file},
-            timeout=30
+            timeout=120  # first MPS generation includes ~60s of kernel warmup
         )
         http_time = time.time() - http_start
 
@@ -128,6 +144,11 @@ def generate_voice():
                 return jsonify({
                     'success': True,
                     'audio_url': f'/static/audio/{audio_id}.wav',
+                    'token_ids': response_data.get('token_ids'),
+                    'tokens': response_data.get('tokens'),
+                    'sample_rate': response_data.get('sample_rate'),
+                    'num_samples': response_data.get('num_samples'),
+                    'duration': response_data.get('duration'),
                     'timing': {
                         'voice_generation': voice_gen_time,
                         'network_overhead': network_overhead,
@@ -155,6 +176,28 @@ def generate_voice():
             'success': False,
             'error': str(e)
         }), 500
+
+VOICE_SERVER = 'http://127.0.0.1:5001'
+VOICE_OFFLINE = {'success': False, 'error': 'voice server offline'}
+
+def voice_proxy(method, path, **kwargs):
+    try:
+        r = requests.request(method, VOICE_SERVER + path, timeout=5, **kwargs)
+        return r.content, r.status_code, {'Content-Type': r.headers.get('Content-Type', 'application/json')}
+    except requests.exceptions.RequestException:
+        return jsonify(VOICE_OFFLINE), 503
+
+@app.route('/voiceprint')
+def voiceprint():
+    return voice_proxy('GET', '/voiceprint')
+
+@app.route('/reference-sample')
+def reference_sample():
+    return voice_proxy('GET', '/reference-sample')
+
+@app.route('/tokenize', methods=['POST'])
+def tokenize():
+    return voice_proxy('POST', '/tokenize', json=request.json)
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
